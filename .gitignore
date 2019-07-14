@@ -1,0 +1,14 @@
+.idea
+.temp
+
+cmake-build-debug
+cmake-build-mbed
+BUILD
+mbed
+
+.pio
+.pioenvs
+.piolibdeps
+CMakeListsPrivate.txt
+
+test
