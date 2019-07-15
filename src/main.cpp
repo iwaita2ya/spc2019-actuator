@@ -5,10 +5,8 @@
 #include "Gs47SerialSRAM.h"
 #include "sineTable.h"
 #include "SensorManager.h"
+#include "MotorManager.h"
 
-// motor duty update frequency
-#define PERIOD_MIN 0.00005f //  20KHz(0.05ms)
-#define PERIOD_MAX 0.00001f // 100KHz(0.05ms)
 
 // sensor update frequency
 #define UPDATE_SENSOR_FREQ 0.1f // センサ更新間隔(秒)
@@ -36,21 +34,11 @@ RawSerial *serial; // tx, rx
 #define DEBUG_PUTC(x)
 #endif
 
-/**
- * Motor Driver
- */
-PwmOut servoReverse = PwmOut(P0_9);
-PwmOut servoForward = PwmOut(P0_10);
-DigitalOut standBy(P0_8); // /Stand-By
-DigitalOut aIn1(P0_11);  // AIN1
-DigitalOut aIn2(P0_12); // AIN2
-DigitalOut bIn1(P0_13); // BIN1
-DigitalOut bIn2(P0_14); // BIN2
 
 /**
  * LED
  */
-DigitalOut myled(P0_7); // LED
+DigitalOut *led; // LED
 
 /**
  * SRAM
@@ -60,6 +48,7 @@ Gs47SerialSRAM *sram;
 using namespace greysound;
 
 SensorManager *sensorManager;
+MotorManager *motorManager;
 
 // Function Prototypes --------------------------------------------------------
 
@@ -67,6 +56,7 @@ SensorManager *sensorManager;
 static void stopSensor();
 static void startSensor();
 static void updateSensor();
+
 // エラー表示
 static void indicateError();
 
@@ -92,32 +82,30 @@ int main() {
     serial = new RawSerial(P0_19, P0_18); // tx, rx
     serial->baud(115200); // default:9600bps
 
-    /**
-     * set motor direction
-     */
-    DEBUG_PRINT("Set motor direction\r\n");
-    // CW: IN1:High IN2:Low
-    aIn1 = 1;
-    aIn2 = 0;
-    // CCW: IN1:Low IN2:High
-    bIn1 = 0;
-    bIn2 = 1;
-    // set /STBY as high
-    standBy = 1;
-
-    // init motor drivers(PWMs)
-    servoForward.period(PERIOD_MIN); // 20KHz
-    servoReverse.period(PERIOD_MIN); // 20KHz
-
     // init SensorManager (and Ticker)
     DEBUG_PRINT("Init SensorManager\r\n");
     sensorTicker = new Ticker();
     sensorManager = new SensorManager(P0_5, P0_4, 0xD6, 0x3C); // sda, scl, agAddr, mAddr, LED1
     sensorManager->init();
 
-    // init SRAM
-    DEBUG_PRINT("init SRAM\r\n");
+    /**
+     * Init MotorManager
+     * forward, reverse, standBy, aIn1, aIn2, bIn1, bIn2, aCount, bCount
+     */
+    DEBUG_PRINT("Init MotorManager\r\n");
+    motorManager = new MotorManager(P0_9, P0_10, P0_8, P0_11, P0_12, P0_13, P0_14, P0_15, P0_16);
+
+    /**
+     * init SRAM
+     */
+    DEBUG_PRINT("Init SRAM\r\n");
     sram = new Gs47SerialSRAM(P0_5, P0_4, P0_6); // sda, scl, hs, A2=0, A1=0
+
+    /**
+     * Init LED
+     */
+    led = new DigitalOut(P0_7);
+    led->write(0); // set led off
 
     //-------------------------------------
     // Main
@@ -125,11 +113,25 @@ int main() {
 
     // start sensor
     DEBUG_PRINT("Start Sensor\r\n");
-    startSensor();
+    //startSensor();
+
+    DEBUG_PRINT("Start Sensor\r\n");
+    // start motor
+    motorManager->start();
+    motorManager->aServo->write(0.5); // duty 50%
+    motorManager->bServo->write(0.5); // duty 50%
 
     DEBUG_PRINT("Start Main Loop\r\n");
     while(isActive == 1) {
-        myled = !myled;
+
+        motorManager->read();
+        serial->printf("duration: %lu aCounter:%ld bCounter:%ld aCount:%ld bCount:%ld aRPM: %d bRPM %d\r\n"
+                , motorManager->duration
+                , motorManager->aCounter, motorManager->bCounter
+                , motorManager->aCount, motorManager->bCount
+                , (int)motorManager->aRPM, (int)motorManager->bRPM);
+
+        led->write(!(led->read()));
         wait(0.5);
     }
 
@@ -239,7 +241,7 @@ static void updateSensor()
  */
 static void indicateError() {
     while(true) {
-        myled = !myled;
+        led->write(!(led->read()));
         wait(0.1);
     }
 }
