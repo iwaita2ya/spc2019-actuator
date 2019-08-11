@@ -15,6 +15,19 @@ extern RawSerial *serial;
 
 namespace greysound {
 
+    enum motorState {
+        REVERSE = 0,
+        FORWARD,
+        STOP,
+        BRAKE,
+        UNKNOWN
+    };
+
+    enum motors {
+        MOTOR_A,
+        MOTOR_B
+    };
+
     class MotorManager {
 
     public:
@@ -52,8 +65,8 @@ namespace greysound {
             bServo->period(PERIOD_MIN); // 20KHz
 
             // set duty
-            aDuty = 0.5f; // 50%
-            bDuty = 0.5f; // 50%
+            aDuty = 0.0f;
+            bDuty = 0.0f;
             aServo->write(aDuty); // 0.0-1.0f
             bServo->write(bDuty); // 0.0-1.0f
 
@@ -201,6 +214,84 @@ namespace greysound {
             bRPM = 0;
             aLastRPM = 0;
             bLastRPM = 0;
+        }
+
+        motorState getMotorState(motors motor) {
+            int in1Value, in2Value;
+
+            switch (motor) {
+                case MOTOR_A:
+                    in1Value = aIn1->read();
+                    in2Value = aIn2->read();
+                    break;
+                case MOTOR_B:
+                    in1Value = bIn1->read();
+                    in2Value = bIn2->read();
+                    break;
+                default:
+                    return STOP;
+            }
+
+            if(in1Value == 0 && in2Value == 0) {
+                return STOP;
+            }
+            if(in1Value == 1 && in2Value == 1) {
+                return BRAKE;
+            }
+            if(in1Value == 1 && in2Value == 0) {
+                return FORWARD;
+            }
+            if(in1Value == 0 && in2Value == 1) {
+                return REVERSE;
+            }
+
+            return UNKNOWN;
+        }
+
+        /**
+         * モーターの回転方向を変更する
+         * @param motor
+         */
+        void changeMotorState(motors motor, motorState state) {
+
+            DigitalOut *in1, *in2;
+
+            switch (motor) {
+                case MOTOR_A:
+                    in1 = aIn1;
+                    in2 = aIn2;
+                    break;
+
+                case MOTOR_B:
+                    in1 = bIn1;
+                    in2 = bIn2;
+                    break;
+                default:
+                    in1 = aIn1;
+                    in2 = aIn2;
+                    break;
+            }
+
+            switch (state) {
+                case FORWARD:
+                    in1->write(1);
+                    in2->write(0);
+                    break;
+                case REVERSE:
+                    in1->write(0);
+                    in2->write(1);
+                    break;
+                case STOP:
+                    in1->write(0);
+                    in2->write(0);
+                    break;
+                case BRAKE:
+                    in1->write(1);
+                    in2->write(1);
+                    break;
+                default:
+                    break;
+            }
         }
 
     protected:
