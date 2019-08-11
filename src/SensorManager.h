@@ -7,7 +7,8 @@
 
 #include <mbed.h>
 #include "GsLSM9DS1.h"
-#include "Gs47SerialSRAM.h"
+#include "GsLSM9DS1_Constants.h"
+#include "SerialSRAM.h"
 #include "sineTable.h"
 
 namespace greysound {
@@ -53,7 +54,15 @@ namespace greysound {
         void init()
         {
             // init sensor
-            lsm9dof->init();
+            lsm9dof->init(
+                    A_SCALE_2G,      // Acc : +/- 2g
+                    G_SCALE_500DPS,  // Gyro: +/- 500 deg/s
+                    M_SCALE_4GS,     // Mag :
+                    A_ODR_119,       // Acc  Data Rate
+                    G_ODR_119_BW_14, // Gyro Data Rate
+                    M_ODR_80         // Mag  Data Rate
+                    );
+
 
             // perform calibration
             lsm9dof->calibrate();
