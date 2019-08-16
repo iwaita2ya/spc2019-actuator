@@ -305,7 +305,7 @@ void GsLSM9DS1::calibrate(bool autoCalc)
 //    serial->printf("acclBiasRawTemp %d/%d/%d\r\n", (int)aBiasRawTemp[X_AXIS], (int)aBiasRawTemp[Y_AXIS], (int)aBiasRawTemp[Z_AXIS]);
 
     // ジャイロと加速度のゆらぎを求め、オフセットとして格納する
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < 3; i++) // x, y, z
     {
         // gyro
         gBiasRaw[i] = (int16_t) gBiasRawTemp[i] / samples;

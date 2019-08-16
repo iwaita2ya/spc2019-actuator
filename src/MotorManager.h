@@ -42,7 +42,7 @@ namespace greysound {
         uint32_t timerValue, duration;
         uint32_t aCount, bCount;
         uint32_t aLastCount, bLastCount;
-        float aRPM, bRPM, aLastRPM, bLastRPM;
+        uint16_t aRPM, bRPM, aLastRPM, bLastRPM;
         float aDuty, bDuty;
 
         // センサの状態管理
@@ -109,10 +109,10 @@ namespace greysound {
             duration = 0; // timerValue - lastTimerValue;
 
             // PRMs
-            aRPM = 0.0f;
-            bRPM = 0.0f;
-            aLastRPM = 0.0f;
-            bLastRPM = 0.0f;
+            aRPM = 0;
+            bRPM = 0;
+            aLastRPM = 0;
+            bLastRPM = 0;
 
             // CREATED 状態に遷移
             currentState = CREATED;
@@ -168,8 +168,8 @@ namespace greysound {
                 bCount = bCountTemp - bLastCount;
 
                 // k=0.8
-                aRPM =  ((aCount * 1000 / duration) * 0.8) + (aLastRPM * 0.2);
-                bRPM =  ((bCount * 1000 / duration) * 0.8) + (bLastRPM * 0.2);
+                aRPM =  (uint16_t) (((aCount * 1000 / duration) * 0.8) + (aLastRPM * 0.2));
+                bRPM =  (uint16_t) (((bCount * 1000 / duration) * 0.8) + (bLastRPM * 0.2));
 
                 // save current values as last values
                 lastTimerValue = timerValue;

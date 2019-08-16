@@ -1,6 +1,7 @@
 #define DEBUG
 
 #include <mbed.h>
+#include "SystemParameters.h"
 #include "GsLSM9DS1.h"
 #include "SerialSRAM.h"
 #include "sineTable.h"
@@ -10,6 +11,11 @@
 
 // sensor update frequency
 #define UPDATE_SENSOR_FREQ 0.1f // センサ更新間隔(秒) //TODO: 本番運用時 <0.1
+// SRAM
+#define CONFIG_AREA_SIZE 0x20   // 0x00-0x20
+#define CONFIG_LOG_SIZE  0x09   // Status(1)+gz_raw(2),aDutyIndex(1),bDutyIndex(1),aRPM(2),bRPM(2),
+#define LOG_START_AT   0x0020   // Status + Altitude = 2byte
+#define SRAM_MAX_SIZE  0x0800   // 0x0000-0x0800
 
 using namespace greysound;
 
@@ -17,22 +23,42 @@ using namespace greysound;
  * params
  */
 static uint8_t aDutyIndex = 0;
-static uint8_t indexReverse = 0;
+static uint8_t bDutyIndex = 0;
+
+/**
+ * Buttons
+ */
+InterruptIn *enableSensors;    // センサ開始トリガ
 
 /**
  * flags
  */
 uint8_t isActive;
 
-Ticker *sensorTicker;   // 9軸センサ更新タイマ
-//SPI spi(dp2, dp1, dp6); // mosi, miso, sclk
+
+/**
+ * Serial Port
+ */
 RawSerial *serial; // tx, rx
+// Circular buffers for serial TX and RX data - used by interrupt routines
+const int serialBufferSize = 255;
+
+// might need to increase buffer size for high baud rates
+char rxBuffer[serialBufferSize+1];
+
+// Circular buffer pointers
+// volatile makes read-modify-write atomic
+volatile int rxInPointer=0;
+volatile int rxOutPointer=0;
+
+// Line buffers for sprintf and sscanf
+char rxLineBuffer[80];
 
 #ifdef DEBUG
 #define DEBUG_PRINT(fmt, ...) serial->printf(fmt, __VA_ARGS__)
 #define DEBUG_PUTC(x) serial->putc(x)
 #else
-#define DEBUG_PRINT(x)
+#define DEBUG_PRINT(fmt, ...)
 #define DEBUG_PUTC(x)
 #endif
 
@@ -47,20 +73,51 @@ DigitalOut *led; // LED
  */
 SerialSRAM *sram;
 
+/**
+ * Config
+ * 設定情報を格納する
+ */
+SystemParameters *config;
+
 using namespace greysound;
 
+/**
+ * Sensor Manager
+ */
+Ticker *sensorTicker;   // センサ更新タイマ
 SensorManager *sensorManager;
+
+/**
+ * Motor Manager
+ */
 MotorManager *motorManager;
 
 // Function Prototypes --------------------------------------------------------
+// Serial
+void interruptRx();
+void readLine();
 
-// ９軸センサ更新
-static void stopSensor();
-static void startSensor();
+// センサ更新
+static void stopFlywheel();
+static void startFlywheel();
 static void updateSensor();
 
 // エラー表示
 static void indicateError();
+
+// ----- SRAM -----
+void printStatusSRAM();                 // get status from SRAM (hex)
+void printStatusVarsReadable();         // get config data from SRAM (ascii)
+void updateStatus(uint8_t newStatus);   // update status
+void printConfig();                 // get config data from SRAM (hex)
+void printConfigReadable();         // get config data from SRAM (ascii)
+void loadConfig();                      // load config data from SRAM to Vars
+void saveConfig();                      // Save config data onto SRAM
+void resetConfig();                     // Init config with default value (and save onto SRAM)
+void dumpMemory();                      // dump all data in SRAM (hex)
+void dumpMemoryReadable();              // dump all data in SRAM (ascii)
+void clearLog(uint16_t startAddress=CONFIG_AREA_SIZE, uint16_t endAddress=SRAM_MAX_SIZE); // clear logged data
+void logData(uint8_t _currentStatus, int16_t gz_raw, uint8_t aDutyIndex, uint8_t bDutyIndex, uint16_t aRPM, uint16_t bRPM);
 
 // TEST
 void dutyTest();
@@ -78,6 +135,9 @@ int main() {
     // Init
     //-------------------------------------
 
+    //TODO: get actual time from RTC
+    set_time(1546268400);  // 2019-01-01 00:00:00
+
     // set active flag
     isActive = 1;
 
@@ -86,6 +146,7 @@ int main() {
      */
     serial = new RawSerial(P0_19, P0_18); // tx, rx
     serial->baud(115200); // default:9600bps
+    serial->attach(&interruptRx, Serial::RxIrq); // interrupts for Rx
 
     // init SensorManager (and Ticker)
     DEBUG_PRINT("Init SensorManager\r\n", NULL);
@@ -105,6 +166,22 @@ int main() {
      */
     DEBUG_PRINT("Init SRAM\r\n", NULL);
     sram = new SerialSRAM(P0_5, P0_4, P0_6); // sda, scl, hs, A2=0, A1=0
+    sram->setAutoStore(1); // enable auto-store
+
+    /**
+     * init System Params
+     */
+    config = new SystemParameters();
+    resetConfig(); //MEMO: 設定初期化 (DEBUG ONLY)
+//    loadConfig(); // 設定をSRAMから変数に読込
+
+    /**
+     * Init Buttons
+     */
+    enableSensors = new InterruptIn(P0_17);     // センサ開始／停止信号
+    enableSensors->mode(PullUp);
+    enableSensors->fall(&startFlywheel);
+    enableSensors->rise(&stopFlywheel);
 
     /**
      * Init LED
@@ -113,7 +190,7 @@ int main() {
     led->write(0); // set led off
 
     //-------------------------------------
-    // Main
+    // Main Procedure
     //-------------------------------------
 
     // start motor
@@ -128,15 +205,62 @@ int main() {
 
     // start sensor
     DEBUG_PRINT("Start Sensor\r\n", NULL);
-    startSensor();
-
+    startFlywheel();
 
     DEBUG_PRINT("Start Main Loop\r\n", NULL);
     while(isActive == 1) {
 
-//        motorManager->read();
+        /**
+         * シリアルコマンド応答
+         */
+        // data received and not read yet?
+        if (rxInPointer != rxOutPointer) {
+
+            readLine();
+            char commandByte = rxLineBuffer[0];
+
+            switch (commandByte) {
+                case 0x00: // ステータス表示 (hex)
+                    printStatusSRAM();
+                    break;
+                case 0x10: // ステータス表示 (ascii)
+                    printStatusVarsReadable();
+                    break;
+                case 0x20: // ステータス更新
+                    updateStatus(rxLineBuffer[1]);
+                    break;
+                case 0x40: // Config 表示 (hex)
+                    printConfig();
+                    break;
+                case 0x41: // Config 表示 (ascii)
+                    printConfigReadable();
+                    break;
+                case 0x70: // 設定初期化
+                    resetConfig();
+                    break;
+                case 0x71: // 設定をSRAMから読み込む
+                    loadConfig();
+                    break;
+                case 0x72: // 設定をSRAMに書き込む
+                    saveConfig();
+                    break;
+                case 0x90: // ログデータ消去
+                    clearLog();
+                    break;
+                case 0xA0: // メモリダンプ　(hex)
+                    dumpMemory();
+                    break;
+                case 0xB0: // メモリダンプ　(ascii)
+                    dumpMemoryReadable();
+                    break;
+                default:
+                    break;
+            }
+        }
+
 
         // RPM を表示
+//                motorManager->read();
 //        serial->printf("duration: %lu aCounter:%ld bCounter:%ld aCount:%ld bCount:%ld aRPM: %d bRPM %d\r\n"
 //                , motorManager->duration
 //                , motorManager->aCounter, motorManager->bCounter
@@ -155,7 +279,7 @@ int main() {
 
     // stop & terminate objects
     motorManager->stop();
-    stopSensor();
+    stopFlywheel();
     delete(sensorManager);
     delete(sensorTicker);
     delete(sram);
@@ -168,7 +292,7 @@ int main() {
  * Functions
  */
 
-static void startSensor()
+static void startFlywheel()
 {
     // センサ開始
     if(sensorManager && sensorManager->getCurrentState() == SensorManager::STAND_BY)
@@ -187,7 +311,7 @@ static void startSensor()
 }
 
 
-static void stopSensor()
+static void stopFlywheel()
 {
     // センサ値更新処理停止
     if(sensorTicker) {
@@ -198,6 +322,10 @@ static void stopSensor()
     if(sensorManager && sensorManager->getCurrentState() != SensorManager::STAND_BY) {
         sensorManager->end();
     }
+
+    // モータ停止（BRAKE ではなく STOP で空転させる）
+    motorManager->changeMotorState(MOTOR_A, STOP);
+    motorManager->changeMotorState(MOTOR_A, STOP);
 }
 
 /**
@@ -208,7 +336,7 @@ static void updateSensor()
     static int16_t gz_raw = 0;
     static int8_t gz128=0, gz128Last=0;
     static uint8_t indexDegree=1;
-    motorState aMotorDirection;
+    motorState aMotorDirection, bMotorDirection;
 
     if(sensorManager) {
 
@@ -219,15 +347,19 @@ static void updateSensor()
         gz_raw = sensorManager->lsm9dof->gz_raw; // -32768<->32767
 
         // MEMO: 256(-128<->127)段階に変換
-        gz128 = uint8_t ((gz_raw >> 8) * 0.8 + gz128Last * 0.3); // -128<->127
+//        gz128 = uint8_t ((gz_raw >> 8) * 0.8 + gz128Last * 0.3); // -128<->127
+        gz128 = (gz_raw >> 8); // -128<->127
 
         // モータの回転状態を取得(FORWARD|REVERSE|STOP|BRAKE)
         aMotorDirection = motorManager->getMotorState(MOTOR_A);
+        bMotorDirection = motorManager->getMotorState(MOTOR_B);
 
-        // プローブは正方向に回転
+        /**
+         * プローブは正方向に回転
+         */
         if(gz128 > 0) {
 
-            // モータの回転方向に応じて処理分岐
+            // モータの回転方向に応じて処理分岐(MotorA)
             switch (aMotorDirection) {
                 case FORWARD: { // 正方向（＝プローブの回転方向と等しい）
 
@@ -268,11 +400,54 @@ static void updateSensor()
                     break;
             }
 
+            // モータの回転方向に応じて処理分岐(MotorB)
+            switch (bMotorDirection) {
+                case FORWARD: { // 正方向（＝プローブの回転方向と等しい）
+
+                    // 差が10以上離れている場合はインデックスを一気に10増加させる
+                    indexDegree = (gz128 - bDutyIndex >= 10) ? 10 : 1;
+
+                    if(gz128 > bDutyIndex) {
+                        // 加速
+                        bDutyIndex += indexDegree;
+                    } else if (gz128 < bDutyIndex){
+                        // 減速
+                        bDutyIndex -= indexDegree;
+                    }
+                    break;
+                }
+                case REVERSE: { // 逆方向
+
+                    // インデックスが10以上の場合は一気に10減少させる
+                    indexDegree = (bDutyIndex >= 10) ? 10 : 1;
+
+                    // 減速
+                    if(bDutyIndex > 0) {
+                        bDutyIndex -= indexDegree;
+                    }
+                    // index=0 に達したのならBRAKE状態にする
+                    if(bDutyIndex == 0) {
+                        bDutyIndex = 0;
+                        motorManager->changeMotorState(MOTOR_B, BRAKE);
+                    }
+                    break;
+                }
+                case STOP:
+                case BRAKE:
+                    // 正回転開始
+                    motorManager->changeMotorState(MOTOR_B, FORWARD);
+                    break;
+                case UNKNOWN:
+                    break;
+            }
+
         }
-        // プローブは逆方向に回転
+        /**
+         * プローブは逆方向に回転
+         */
         else if (gz128 < -1) { // -2 <-> -128
 
-            // モータの回転方向に応じて処理分岐
+            // モータの回転方向に応じて処理分岐(MotorA)
             switch (aMotorDirection) {
                 case REVERSE: { // 逆方向（＝プローブの回転方向と等しい）
 
@@ -315,22 +490,72 @@ static void updateSensor()
                     break;
             }
 
+            // モータの回転方向に応じて処理分岐(MotorB)
+            switch (bMotorDirection) {
+                case REVERSE: { // 逆方向（＝プローブの回転方向と等しい）
+
+                    uint8_t absGz128 = abs(gz128);
+
+                    // 差が10以上離れている場合はインデックスを一気に10増加させる
+                    indexDegree = (absGz128 - bDutyIndex >= 10) ? 10 : 1;
+
+                    if(absGz128 > bDutyIndex) {
+                        // 加速
+                        bDutyIndex += indexDegree;
+                    } else if (absGz128 < bDutyIndex){
+                        // 減速
+                        bDutyIndex -= indexDegree;
+                    }
+                    break;
+                }
+                case FORWARD: { // 正方向
+
+                    // インデックスが10以上の場合は一気に10減少させる
+                    indexDegree = (bDutyIndex >= 10) ? 10 : 1;
+
+                    // 減速
+                    if(bDutyIndex > 0) {
+                        bDutyIndex -= indexDegree;
+                    }
+                    // index=0 に達したのならBRAKE状態にする
+                    if(bDutyIndex == 0) {
+                        bDutyIndex = 0;
+                        motorManager->changeMotorState(MOTOR_B, BRAKE);
+                    }
+                    break;
+                }
+                case STOP:
+                case BRAKE:
+                    // 逆回転開始
+                    motorManager->changeMotorState(MOTOR_B, REVERSE);
+                    break;
+                default:
+                    break;
+            }
+        // 平衡状態
         } else {
-            // 平衡状態
             if(aDutyIndex > 0) {
                 aDutyIndex--; //MEMO: 高回転で平衡状態の場合、この処理が悪影響を及ぼす可能性がある
             }
+            if(bDutyIndex > 0) {
+                bDutyIndex--; //MEMO: 高回転で平衡状態の場合、この処理が悪影響を及ぼす可能性がある
+            }
         }
 
-        DEBUG_PRINT("raw:%d, 128:%d, index:%d, duty(x100):%d\r\n", gz_raw, gz128, aDutyIndex, (int)(dutyTable[indexReverse] * 100));
 //        DEBUG_PRINT("gz:%d, index:%d, duty:%d\r\n", gz128, aDutyIndex, (int)(dutyTable[indexReverse] * 100));
+//        DEBUG_PRINT("raw:%d, 128:%d, idxA:%d idxB:%d\r\n", gz_raw, gz128, aDutyIndex, bDutyIndex);
 
         // dutyを更新する
-        motorManager->aServo->write(dutyTable[aDutyIndex]);
-        motorManager->bServo->write(dutyTable[indexReverse]);
+        motorManager->aServo->write(dutyTableX2[aDutyIndex]);
+        motorManager->bServo->write(dutyTableX2[bDutyIndex]);
 
         // 直近の値を保存しておく
         gz128Last = gz128;
+
+        // ログに記録
+        if(config->enableLogging) {
+            logData(config->statusFlags, gz_raw, aDutyIndex, bDutyIndex, motorManager->aRPM, motorManager->bRPM);
+        }
     }
 }
 
@@ -410,4 +635,303 @@ void brakeTest() {
     wait_ms(5000);
 
     DEBUG_PRINT("END OF BRAKE TEST\r\n", NULL);
+}
+
+/**
+ * Serial
+ */
+// Interrupt Routine to read in data from serial port
+void interruptRx() {
+
+    // Loop just in case more than one character is in UART's receive FIFO buffer
+    // Stop if buffer full
+    while ((serial->readable()) && (((rxInPointer + 1) % serialBufferSize) != rxOutPointer)) {
+        rxBuffer[rxInPointer] = serial->getc();
+
+        // Uncomment to Echo to USB serial to watch data flow
+        //serial->putc(rxBuffer[rxInPointer]); // echo back
+        rxInPointer = (rxInPointer + 1) % serialBufferSize;
+    }
+}
+
+// Read a line from the large rx buffer from rx interrupt routine
+void readLine() {
+
+    int i;
+    i = 0;
+    // Start Critical Section - don't interrupt while changing global buffer variables
+    NVIC_DisableIRQ(UART_IRQn);
+
+    // Loop reading rx buffer characters until end of line character
+    while ((i==0) || (rxLineBuffer[i-1] != '\r')) { // '\r' = 0x0d
+        rxLineBuffer[i] = rxBuffer[rxOutPointer];
+        i++;
+        rxOutPointer = (rxOutPointer + 1) % serialBufferSize;
+    }
+
+    // End Critical Section
+    NVIC_EnableIRQ(UART_IRQn);
+    rxLineBuffer[i-1] = 0;
+}
+
+/**
+ * SRAM
+ */
+void printStatusSRAM() {
+
+    char statusByte = 0x00;
+
+    // Read single byte at 0x0000
+    sram->read(0x0000, &statusByte);
+
+    serial->putc(statusByte);
+}
+
+void printStatusVarsReadable() {
+
+}
+
+void updateStatus(uint8_t newStatus) {
+
+    // update status var
+    config->statusFlags = newStatus;
+
+    // update sram
+    sram->write(0x0000, newStatus);
+}
+
+void printConfig() {
+    unsigned char charValue[sizeof(time_t)];
+    uint8_t i;
+
+    serial->putc(config->statusFlags); // ステータスフラグ
+
+    memcpy(charValue, &config->gyroBiasX, sizeof(float));  // Gyro Bias(X)
+    for(i=0;i<sizeof(float);i++) {
+        serial->putc(charValue[i]);
+    }
+    memcpy(charValue, &config->gyroBiasY, sizeof(float));  // Gyro Bias(Y)
+    for(i=0;i<sizeof(float);i++) {
+        serial->putc(charValue[i]);
+    }
+    memcpy(charValue, &config->gyroBiasZ, sizeof(float));  // Gyro Bias(Z)
+    for(i=0;i<sizeof(float);i++) {
+        serial->putc(charValue[i]);
+    }
+
+    serial->putc(config->enableLogging);                    // enable/disable logging
+
+    memcpy(charValue, &config->logPointer, sizeof(uint16_t));   // latest log pointer
+    for(i=0;i<sizeof(uint16_t);i++) {
+        serial->putc(charValue[i]);
+    }
+
+    memcpy(charValue, &config->logStartTime, sizeof(time_t));   // logging started time
+    for(i=0;i<sizeof(time_t);i++) {
+        serial->putc(charValue[i]);
+    }
+}
+
+void printConfigReadable() {
+
+    /**
+     * 0x0000 statusFlags(uint8_t:1)
+     * 0x0001-0x0004 gyroBiasX(float:4)
+     * 0x0005-0x0008 gyroBiasX(float:4)
+     * 0x0009-0x000C gyroBiasX(float:4)
+     * 0x000D enableLogging(uint8_t:1)
+     * 0x000E-0x000F logPointer(uint16_t:2)
+     * 0x0010-0x0013 logStartTime(time_t:4)
+     */
+
+    // status flag
+    char statusByte = config->statusFlags;
+    serial->printf("Er xx xx xx xx xx FA In\r\n");
+    serial->printf("-----------------------\r\n");
+    serial->printf(" %d  %d  %d  %d  %d  %d  %d  %d\r\n"
+            , ((statusByte & 0x80) ? 1 : 0)
+            , ((statusByte & 0x40) ? 1 : 0)
+            , ((statusByte & 0x20) ? 1 : 0)
+            , ((statusByte & 0x10) ? 1 : 0)
+            , ((statusByte & 0x08) ? 1 : 0)
+            , ((statusByte & 0x04) ? 1 : 0)
+            , ((statusByte & 0x02) ? 1 : 0)
+            , ((statusByte & 0x01) ? 1 : 0)
+    );
+    serial->printf("Gyro Bias(x y z):%04d %04d %04d\r\n", (uint32_t) config->gyroBiasX * 1000, (uint32_t) config->gyroBiasY * 1000, (uint32_t) config->gyroBiasZ * 1000);
+    serial->printf("Enable Logging  : %d\r\n", config->enableLogging);
+    serial->printf("Log pointer: 0x%04X\r\n", config->logPointer);
+    serial->printf("Logged at: %d\r\n", (time_t) config->logStartTime);
+}
+
+void loadConfig() {
+
+    uint32_t uint32Value;
+    char *buffer = new char[CONFIG_AREA_SIZE];
+
+    sram->read(0x0000, (char*)buffer, CONFIG_AREA_SIZE); // read 0x0000-0x0020
+
+    /**
+     * 0x0000 statusFlags(uint8_t:1)
+     * 0x0001-0x0004 gyroBiasX(float:4)
+     * 0x0005-0x0008 gyroBiasX(float:4)
+     * 0x0009-0x000C gyroBiasX(float:4)
+     * 0x000D enableLogging(uint8_t:1)
+     * 0x000E-0x000F logPointer(uint16_t:2)
+     * 0x0010-0x0013 logStartTime(time_t:4)
+     */
+
+    config->statusFlags        = (uint8_t) buffer[0];
+    uint32Value = (buffer[4] << 24 | buffer[3] << 16 | buffer[2] << 8 | buffer[1]);
+    config->gyroBiasX = *(float*)&uint32Value;
+    uint32Value = (buffer[8] << 24 | buffer[7] << 16 | buffer[6] << 8 | buffer[5]);
+    config->gyroBiasY = *(float*)&uint32Value;
+    uint32Value = (buffer[12] << 24 | buffer[11] << 16 | buffer[10] << 8 | buffer[9]);
+    config->gyroBiasY = *(float*)&uint32Value;
+    config->enableLogging  = (uint8_t) buffer[13];
+    config->logPointer     = (uint16_t) (buffer[15] << 8 | buffer[14]);
+    config->logStartTime   = (time_t) (buffer[19] << 24 | buffer[18] << 16 | buffer[17] << 8 | buffer[16]);
+
+    delete[] buffer;
+}
+
+void saveConfig() {
+
+    char charValue[sizeof(float)];
+
+    /**
+     * 0x0000 statusFlags(uint8_t:1)
+     * 0x0001-0x0004 gyroBiasX(float:4)
+     * 0x0005-0x0008 gyroBiasX(float:4)
+     * 0x0009-0x000C gyroBiasX(float:4)
+     * 0x000D enableLogging(uint8_t:1)
+     * 0x000E-0x000F logPointer(uint16_t:2)
+     * 0x0010-0x0013 logStartTime(time_t:4)
+     */
+
+    // status flags
+    sram->write(0x0000, config->statusFlags);
+
+    // Gyro Bias
+    memcpy(charValue, &config->gyroBiasX, sizeof(float));
+    sram->write(0x0001, charValue, sizeof(float));
+    memcpy(charValue, &config->gyroBiasY, sizeof(float));
+    sram->write(0x0005, charValue, sizeof(float));
+    memcpy(charValue, &config->gyroBiasZ, sizeof(float));
+    sram->write(0x0009, charValue, sizeof(float));
+
+    // enable logging
+    sram->write(0x000D, config->enableLogging);
+
+    // log pointer
+    memcpy(charValue, &config->logPointer, sizeof(uint16_t));
+    sram->write(0x000E, charValue, sizeof(uint16_t));
+
+    // log start time
+    memcpy(charValue, &config->logStartTime, sizeof(time_t));
+    sram->write(0x0010, charValue, sizeof(time_t));
+}
+
+/**
+ * 設定値を初期化して変数とSRAMにそれぞれ保存する
+ * 0x0000 statusFlags(uint8_t:1)
+ * 0x0001-0x0004 gyroBiasX(float:4)
+ * 0x0005-0x0008 gyroBiasX(float:4)
+ * 0x0009-0x000C gyroBiasX(float:4)
+ * 0x000D enableLogging(uint8_t:1)
+ * 0x000E-0x000F logPointer(uint16_t:2)
+ * 0x0010-0x0013 logStartTime(time_t:4)
+ */
+void resetConfig() {
+    config->statusFlags = 0x00;
+    config->gyroBiasX = 0.0f;
+    config->gyroBiasY = 0.0f;
+    config->gyroBiasZ = 0.0f;
+    config->enableLogging = 0;
+    config->logPointer = LOG_START_AT;
+    config->logStartTime = time(NULL); // current time(timestamp)
+}
+
+void dumpMemory() {
+    static const uint8_t bufferLength = 16;
+    char *buffer = new char[bufferLength];
+
+    for(uint16_t address=0x0000; address<SRAM_MAX_SIZE; address+=bufferLength) {
+
+        // Seq. Read
+        sram->read(address, buffer, bufferLength);
+
+        for(uint8_t i=0; i<bufferLength; i++) {
+            serial->putc(buffer[i]);
+        }
+    }
+
+    delete[] buffer;
+}
+
+void dumpMemoryReadable() {
+    static const uint8_t bufferLength = 16;
+    char *buffer = new char[bufferLength];
+
+    serial->printf("ADDR 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f\r\n");
+    serial->printf("----------------------------------------------------\r\n");
+
+    for(uint16_t address=0x0000; address<SRAM_MAX_SIZE; address+=bufferLength) {
+        // Seq. Read
+        sram->read(address, buffer, bufferLength);
+
+        serial->printf("%04x ", address);
+        for(uint8_t i=0; i<bufferLength; i++) {
+            serial->printf("%02x ", buffer[i]);
+        }
+        serial->printf("\r\n");
+    }
+
+    delete[] buffer;
+}
+
+void clearLog(uint16_t startAddress, uint16_t endAddress){
+
+    uint8_t retryCount = 0;
+    for (uint16_t i=startAddress; i<endAddress; i++) {
+        retryCount = 0;
+        while(sram->write(i, 0x00) != 0 && retryCount++ < 5) {
+            sram->write(i, 0x00);
+        }
+    }
+}
+
+/**
+ * save current data onto SRAM
+ */
+void logData(uint8_t _currentStatus, int16_t _gz_raw, uint8_t _aDutyIndex, uint8_t _bDutyIndex, uint16_t _aRPM, uint16_t _bRPM) {
+
+    // if overflow, reset pointer
+    if(config->logPointer + CONFIG_LOG_SIZE > SRAM_MAX_SIZE) {
+        config->logPointer = LOG_START_AT;
+    }
+
+    // write current status
+    sram->write(config->logPointer++, _currentStatus);
+
+    // write gz_raw
+    sram->write(config->logPointer, _gz_raw);
+    config->logPointer += 2;
+
+    // write duty index for Motor A
+    sram->write(config->logPointer++, _aDutyIndex);
+
+    // write duty index for Motor B
+    sram->write(config->logPointer++, _bDutyIndex);
+
+    // write RPM for Motor A
+    sram->write(config->logPointer, _aRPM);
+    config->logPointer += 2;
+
+    // write RPM for Motor B
+    sram->write(config->logPointer, _bRPM);
+    config->logPointer += 2;
+
+    // save current logging pointer
+    sram->write(0x0012, config->logPointer);
 }
