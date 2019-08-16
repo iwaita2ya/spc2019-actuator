@@ -19,6 +19,13 @@
 
 using namespace greysound;
 
+// 状態管理
+enum DeviceState {
+    IDLE     = 0x01,
+    ACTIVE   = 0x02,
+    ERROR    = 0x80
+};
+
 /**
  * params
  */
@@ -97,25 +104,25 @@ MotorManager *motorManager;
 void interruptRx();
 void readLine();
 
-// センサ更新
-static void stopFlywheel();
+// アクチュエータ状態遷移
 static void startFlywheel();
+static void stopFlywheel();
+
+// センサ
+void calibrateSensor();
 static void updateSensor();
 
 // エラー表示
 static void indicateError();
 
 // ----- SRAM -----
-void printStatusSRAM();                 // get status from SRAM (hex)
-void printStatusVarsReadable();         // get config data from SRAM (ascii)
-void updateStatus(uint8_t newStatus);   // update status
-void printConfig();                 // get config data from SRAM (hex)
-void printConfigReadable();         // get config data from SRAM (ascii)
-void loadConfig();                      // load config data from SRAM to Vars
-void saveConfig();                      // Save config data onto SRAM
-void resetConfig();                     // Init config with default value (and save onto SRAM)
-void dumpMemory();                      // dump all data in SRAM (hex)
-void dumpMemoryReadable();              // dump all data in SRAM (ascii)
+void printConfig();         // get config data from SRAM (hex)
+void printConfigReadable(); // get config data from SRAM (ascii)
+void loadConfig();          // load config data from SRAM to Vars
+void saveConfig();          // Save config data onto SRAM
+void resetConfig();         // Init config with default value (and save onto SRAM)
+void dumpMemory();          // dump all data in SRAM (hex)
+void dumpMemoryReadable();  // dump all data in SRAM (ascii)
 void clearLog(uint16_t startAddress=CONFIG_AREA_SIZE, uint16_t endAddress=SRAM_MAX_SIZE); // clear logged data
 void logData(uint8_t _currentStatus, int16_t gz_raw, uint8_t aDutyIndex, uint8_t bDutyIndex, uint16_t aRPM, uint16_t bRPM);
 
@@ -148,7 +155,9 @@ int main() {
     serial->baud(115200); // default:9600bps
     serial->attach(&interruptRx, Serial::RxIrq); // interrupts for Rx
 
-    // init SensorManager (and Ticker)
+    /**
+     * init SensorManager (and Ticker)
+     */
     DEBUG_PRINT("Init SensorManager\r\n", NULL);
     sensorTicker = new Ticker();
     sensorManager = new SensorManager(P0_5, P0_4, 0xD6, 0x3C); // sda, scl, agAddr, mAddr, LED1
@@ -172,8 +181,8 @@ int main() {
      * init System Params
      */
     config = new SystemParameters();
-    resetConfig(); //MEMO: 設定初期化 (DEBUG ONLY)
-//    loadConfig(); // 設定をSRAMから変数に読込
+//    resetConfig(); //MEMO: 設定初期化 (DEBUG ONLY)
+    loadConfig(); // 設定をSRAMから変数に読込
 
     /**
      * Init Buttons
@@ -204,54 +213,76 @@ int main() {
 //    brakeTest();
 
     // start sensor
-    DEBUG_PRINT("Start Sensor\r\n", NULL);
-    startFlywheel();
+//    DEBUG_PRINT("Start Sensor\r\n", NULL);
+//    startFlywheel();
+
+    // キャリブレーションが終わっていない場合は実行する
+    if(config->gyroBiasRawX == 0 && config->gyroBiasRawY == 0 && config->gyroBiasRawZ == 0) {
+        calibrateSensor();
+    }
+
+    // デバイスの状態に応じでアクチュエータを起動・停止する
+    if(config->statusFlags == IDLE) {
+        DEBUG_PRINT("Stop Flywheel\r\n", NULL);
+        stopFlywheel();
+    } else if (config->statusFlags == ACTIVE) {
+        DEBUG_PRINT("Start Flywheel\r\n", NULL);
+        startFlywheel();
+    }
 
     DEBUG_PRINT("Start Main Loop\r\n", NULL);
     while(isActive == 1) {
 
         /**
          * シリアルコマンド応答
+         * (アイドル時のみ有効)
          */
         // data received and not read yet?
+//        if (config->statusFlags == IDLE && rxInPointer != rxOutPointer) {
         if (rxInPointer != rxOutPointer) {
 
             readLine();
             char commandByte = rxLineBuffer[0];
 
             switch (commandByte) {
-                case 0x00: // ステータス表示 (hex)
-                    printStatusSRAM();
+                case 0x00: // キャリブレーション
+                    calibrateSensor();
                     break;
-                case 0x10: // ステータス表示 (ascii)
-                    printStatusVarsReadable();
+                case 0x10: // アクチュエータ停止
+                    stopFlywheel();
                     break;
-                case 0x20: // ステータス更新
-                    updateStatus(rxLineBuffer[1]);
+                case 0x11: // アクチュエータ開始
+                    startFlywheel();
                     break;
-                case 0x40: // Config 表示 (hex)
+                case 0x20: // Config 表示 (hex)
                     printConfig();
                     break;
-                case 0x41: // Config 表示 (ascii)
+                case 0x21: // Config 表示 (ascii)
                     printConfigReadable();
                     break;
-                case 0x70: // 設定初期化
+                case 0x22: // Config 初期化
                     resetConfig();
                     break;
-                case 0x71: // 設定をSRAMから読み込む
+                case 0x23: // Load SRAM->Config
                     loadConfig();
                     break;
-                case 0x72: // 設定をSRAMに書き込む
+                case 0x24: // Save Config->SRAM
                     saveConfig();
                     break;
-                case 0x90: // ログデータ消去
+                case 0x30: // ログデータ消去
                     clearLog();
                     break;
-                case 0xA0: // メモリダンプ　(hex)
+                case 0x40: // メモリダンプ　(hex)
                     dumpMemory();
                     break;
-                case 0xB0: // メモリダンプ　(ascii)
+                case 0x41: // メモリダンプ　(ascii)
                     dumpMemoryReadable();
+                    break;
+                case 0xF0: // 力率あたりの回転数を測定
+                    dutyTest();
+                    break;
+                case 0xF1: // ブレーキテスト
+                    brakeTest();
                     break;
                 default:
                     break;
@@ -301,12 +332,18 @@ static void startFlywheel()
         if (sensorManager->begin() == 0) {
             indicateError();
             return; //TODO: エラーからリカバリできるようにする
-        };
-    }
+        }
 
-    // センサ値更新処理開始
-    if(sensorTicker) {
-        sensorTicker->attach(&updateSensor, UPDATE_SENSOR_FREQ);
+        // センサ値更新処理開始
+        if(sensorTicker) {
+            sensorTicker->attach(&updateSensor, UPDATE_SENSOR_FREQ);
+        }
+
+        // フラグ更新&Save
+        config->statusFlags = ACTIVE;
+        sram->write(0x0000, config->statusFlags);
+        config->enableLogging = 1;
+        sram->write(0x0007, config->enableLogging);
     }
 }
 
@@ -326,6 +363,24 @@ static void stopFlywheel()
     // モータ停止（BRAKE ではなく STOP で空転させる）
     motorManager->changeMotorState(MOTOR_A, STOP);
     motorManager->changeMotorState(MOTOR_A, STOP);
+
+    // フラグ更新
+    if(config->statusFlags == ACTIVE) {
+        config->statusFlags = IDLE;
+        sram->write(0x0000, config->statusFlags);
+        config->enableLogging = 0;
+        sram->write(0x0007, config->enableLogging);
+
+        // save data onto EEPROM
+        sram->callHardwareStore();
+    }
+}
+
+
+void calibrateSensor() {
+    DEBUG_PRINT("Perform Calibration\r\n", NULL);
+    sensorManager->calibration(&config->gyroBiasRawX, &config->gyroBiasRawY, &config->gyroBiasRawZ);
+    saveConfig();
 }
 
 /**
@@ -675,47 +730,24 @@ void readLine() {
 }
 
 /**
- * SRAM
+ * Config
  */
-void printStatusSRAM() {
-
-    char statusByte = 0x00;
-
-    // Read single byte at 0x0000
-    sram->read(0x0000, &statusByte);
-
-    serial->putc(statusByte);
-}
-
-void printStatusVarsReadable() {
-
-}
-
-void updateStatus(uint8_t newStatus) {
-
-    // update status var
-    config->statusFlags = newStatus;
-
-    // update sram
-    sram->write(0x0000, newStatus);
-}
-
 void printConfig() {
     unsigned char charValue[sizeof(time_t)];
     uint8_t i;
 
     serial->putc(config->statusFlags); // ステータスフラグ
 
-    memcpy(charValue, &config->gyroBiasX, sizeof(float));  // Gyro Bias(X)
-    for(i=0;i<sizeof(float);i++) {
+    memcpy(charValue, &config->gyroBiasRawX, sizeof(int16_t));  // Gyro Bias(X)
+    for(i=0;i<sizeof(int16_t);i++) {
         serial->putc(charValue[i]);
     }
-    memcpy(charValue, &config->gyroBiasY, sizeof(float));  // Gyro Bias(Y)
-    for(i=0;i<sizeof(float);i++) {
+    memcpy(charValue, &config->gyroBiasRawY, sizeof(int16_t));  // Gyro Bias(Y)
+    for(i=0;i<sizeof(int16_t);i++) {
         serial->putc(charValue[i]);
     }
-    memcpy(charValue, &config->gyroBiasZ, sizeof(float));  // Gyro Bias(Z)
-    for(i=0;i<sizeof(float);i++) {
+    memcpy(charValue, &config->gyroBiasRawZ, sizeof(int16_t));  // Gyro Bias(Z)
+    for(i=0;i<sizeof(int16_t);i++) {
         serial->putc(charValue[i]);
     }
 
@@ -746,7 +778,7 @@ void printConfigReadable() {
 
     // status flag
     char statusByte = config->statusFlags;
-    serial->printf("Er xx xx xx xx xx FA In\r\n");
+    serial->printf("Er xx xx xx xx xx Ac Id\r\n");
     serial->printf("-----------------------\r\n");
     serial->printf(" %d  %d  %d  %d  %d  %d  %d  %d\r\n"
             , ((statusByte & 0x80) ? 1 : 0)
@@ -758,98 +790,101 @@ void printConfigReadable() {
             , ((statusByte & 0x02) ? 1 : 0)
             , ((statusByte & 0x01) ? 1 : 0)
     );
-    serial->printf("Gyro Bias(x y z):%04d %04d %04d\r\n", (uint32_t) config->gyroBiasX * 1000, (uint32_t) config->gyroBiasY * 1000, (uint32_t) config->gyroBiasZ * 1000);
-    serial->printf("Enable Logging  : %d\r\n", config->enableLogging);
+    serial->printf("Gyro BiasRaw(x y z): %05d %05d %05d\r\n", config->gyroBiasRawX, config->gyroBiasRawY, config->gyroBiasRawZ);
+    serial->printf("Enable Logging: %d\r\n", config->enableLogging);
     serial->printf("Log pointer: 0x%04X\r\n", config->logPointer);
     serial->printf("Logged at: %d\r\n", (time_t) config->logStartTime);
 }
 
 void loadConfig() {
 
-    uint32_t uint32Value;
     char *buffer = new char[CONFIG_AREA_SIZE];
 
     sram->read(0x0000, (char*)buffer, CONFIG_AREA_SIZE); // read 0x0000-0x0020
 
     /**
      * 0x0000 statusFlags(uint8_t:1)
-     * 0x0001-0x0004 gyroBiasX(float:4)
-     * 0x0005-0x0008 gyroBiasX(float:4)
-     * 0x0009-0x000C gyroBiasX(float:4)
-     * 0x000D enableLogging(uint8_t:1)
-     * 0x000E-0x000F logPointer(uint16_t:2)
-     * 0x0010-0x0013 logStartTime(time_t:4)
+     * 0x0001-0x0002 gyroBiasX(int16_t:2)
+     * 0x0003-0x0004 gyroBiasX(int16_t:2)
+     * 0x0005-0x0006 gyroBiasX(int16_t:2)
+     * 0x0007 enableLogging(uint8_t:1)
+     * 0x0008-0x0009 logPointer(uint16_t:2)
+     * 0x000A-0x000D logStartTime(time_t:4)
      */
 
-    config->statusFlags        = (uint8_t) buffer[0];
-    uint32Value = (buffer[4] << 24 | buffer[3] << 16 | buffer[2] << 8 | buffer[1]);
-    config->gyroBiasX = *(float*)&uint32Value;
-    uint32Value = (buffer[8] << 24 | buffer[7] << 16 | buffer[6] << 8 | buffer[5]);
-    config->gyroBiasY = *(float*)&uint32Value;
-    uint32Value = (buffer[12] << 24 | buffer[11] << 16 | buffer[10] << 8 | buffer[9]);
-    config->gyroBiasY = *(float*)&uint32Value;
-    config->enableLogging  = (uint8_t) buffer[13];
-    config->logPointer     = (uint16_t) (buffer[15] << 8 | buffer[14]);
-    config->logStartTime   = (time_t) (buffer[19] << 24 | buffer[18] << 16 | buffer[17] << 8 | buffer[16]);
+    config->statusFlags   = (uint8_t) buffer[0];
+    config->gyroBiasRawX  = (uint16_t) (buffer[2] << 8 | buffer[1]);
+    config->gyroBiasRawY  = (uint16_t) (buffer[4] << 8 | buffer[3]);
+    config->gyroBiasRawZ  = (uint16_t) (buffer[6] << 8 | buffer[5]);
+    config->enableLogging = (uint8_t) buffer[7];
+    config->logPointer    = (uint16_t) (buffer[9] << 8 | buffer[8]);
+    config->logStartTime  = (time_t) (buffer[13] << 24 | buffer[12] << 16 | buffer[11] << 8 | buffer[10]);
 
     delete[] buffer;
 }
 
 void saveConfig() {
 
-    char charValue[sizeof(float)];
+    char charValue[sizeof(time_t)];
 
     /**
      * 0x0000 statusFlags(uint8_t:1)
-     * 0x0001-0x0004 gyroBiasX(float:4)
-     * 0x0005-0x0008 gyroBiasX(float:4)
-     * 0x0009-0x000C gyroBiasX(float:4)
-     * 0x000D enableLogging(uint8_t:1)
-     * 0x000E-0x000F logPointer(uint16_t:2)
-     * 0x0010-0x0013 logStartTime(time_t:4)
+     * 0x0001-0x0002 gyroBiasX(int16_t:2)
+     * 0x0003-0x0004 gyroBiasX(int16_t:2)
+     * 0x0005-0x0006 gyroBiasX(int16_t:2)
+     * 0x0007 enableLogging(uint8_t:1)
+     * 0x0008-0x0009 logPointer(uint16_t:2)
+     * 0x000A-0x000D logStartTime(time_t:4)
      */
 
     // status flags
     sram->write(0x0000, config->statusFlags);
 
     // Gyro Bias
-    memcpy(charValue, &config->gyroBiasX, sizeof(float));
-    sram->write(0x0001, charValue, sizeof(float));
-    memcpy(charValue, &config->gyroBiasY, sizeof(float));
-    sram->write(0x0005, charValue, sizeof(float));
-    memcpy(charValue, &config->gyroBiasZ, sizeof(float));
-    sram->write(0x0009, charValue, sizeof(float));
+    memcpy(charValue, &config->gyroBiasRawX, sizeof(uint16_t));
+    sram->write(0x0001, charValue, sizeof(uint16_t));
+    memcpy(charValue, &config->gyroBiasRawY, sizeof(uint16_t));
+    sram->write(0x0003, charValue, sizeof(uint16_t));
+    memcpy(charValue, &config->gyroBiasRawZ, sizeof(uint16_t));
+    sram->write(0x0005, charValue, sizeof(uint16_t));
 
     // enable logging
-    sram->write(0x000D, config->enableLogging);
+    sram->write(0x0007, config->enableLogging);
 
     // log pointer
     memcpy(charValue, &config->logPointer, sizeof(uint16_t));
-    sram->write(0x000E, charValue, sizeof(uint16_t));
+    sram->write(0x0008, charValue, sizeof(uint16_t));
 
     // log start time
     memcpy(charValue, &config->logStartTime, sizeof(time_t));
-    sram->write(0x0010, charValue, sizeof(time_t));
+    sram->write(0x000A, charValue, sizeof(time_t));
+
+    // save data onto EEPROM
+    sram->callHardwareStore();
 }
 
 /**
  * 設定値を初期化して変数とSRAMにそれぞれ保存する
  * 0x0000 statusFlags(uint8_t:1)
- * 0x0001-0x0004 gyroBiasX(float:4)
- * 0x0005-0x0008 gyroBiasX(float:4)
- * 0x0009-0x000C gyroBiasX(float:4)
- * 0x000D enableLogging(uint8_t:1)
- * 0x000E-0x000F logPointer(uint16_t:2)
- * 0x0010-0x0013 logStartTime(time_t:4)
+ * 0x0001-0x0002 gyroBiasX(int16_t:2)
+ * 0x0003-0x0004 gyroBiasX(int16_t:2)
+ * 0x0005-0x0006 gyroBiasX(int16_t:2)
+ * 0x0007 enableLogging(uint8_t:1)
+ * 0x0008-0x0009 logPointer(uint16_t:2)
+ * 0x000A-0x000D logStartTime(time_t:4)
  */
 void resetConfig() {
-    config->statusFlags = 0x00;
-    config->gyroBiasX = 0.0f;
-    config->gyroBiasY = 0.0f;
-    config->gyroBiasZ = 0.0f;
+    // init vars
+    config->statusFlags = IDLE;
+    config->gyroBiasRawX  = 0;
+    config->gyroBiasRawY  = 0;
+    config->gyroBiasRawZ  = 0;
     config->enableLogging = 0;
     config->logPointer = LOG_START_AT;
     config->logStartTime = time(NULL); // current time(timestamp)
+
+    // save SRAM
+    saveConfig();
 }
 
 void dumpMemory() {
@@ -899,6 +934,9 @@ void clearLog(uint16_t startAddress, uint16_t endAddress){
             sram->write(i, 0x00);
         }
     }
+
+    // save data onto EEPROM
+    sram->callHardwareStore();
 }
 
 /**
@@ -933,5 +971,5 @@ void logData(uint8_t _currentStatus, int16_t _gz_raw, uint8_t _aDutyIndex, uint8
     config->logPointer += 2;
 
     // save current logging pointer
-    sram->write(0x0012, config->logPointer);
+    sram->write(0x0008, config->logPointer);
 }

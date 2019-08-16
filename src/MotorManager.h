@@ -2,8 +2,8 @@
 // Created by iwait on 7/14/19.
 //
 
-#ifndef SPC2019_ACTUATOR_MOTORMANAGER_H
-#define SPC2019_ACTUATOR_MOTORMANAGER_H
+#ifndef SPC2019_ACTUATOR_MOTOR_MANAGER_H
+#define SPC2019_ACTUATOR_MOTOR_MANAGER_H
 
 #include <mbed.h>
 
@@ -311,4 +311,4 @@ namespace greysound {
 
     };
 }
-#endif //SPC2019_ACTUATOR_MOTORMANAGER_H
+#endif //SPC2019_ACTUATOR_MOTOR_MANAGER_H

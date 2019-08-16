@@ -56,19 +56,24 @@ namespace greysound {
             // init sensor
             lsm9dof->init(
                     A_SCALE_2G,      // Acc : +/- 2g
-                    G_SCALE_500DPS,  // Gyro: +/- 500 deg/s
+                    G_SCALE_245DPS,  // Gyro: +/- 245 deg/s
                     M_SCALE_4GS,     // Mag :
                     A_ODR_119,       // Acc  Data Rate
                     G_ODR_119_BW_14, // Gyro Data Rate
                     M_ODR_80         // Mag  Data Rate
                     );
 
+            currentState = STAND_BY;
+        }
 
+        void calibration(int16_t *gBiasRawX, int16_t *gBiasRawY, int16_t *gBiasRawZ) {
             // perform calibration
             lsm9dof->calibrate();
             lsm9dof->calibrateMag(true); // true: save calculated bias onto register
 
-            currentState = STAND_BY;
+            *gBiasRawX = lsm9dof->gBiasRaw[0];
+            *gBiasRawY = lsm9dof->gBiasRaw[1];
+            *gBiasRawZ = lsm9dof->gBiasRaw[2];
         }
 
         uint8_t begin()
