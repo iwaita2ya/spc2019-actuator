@@ -334,7 +334,7 @@ void GsLSM9DS1::calibrateMag(bool loadIn)
     uint8_t i, j;
     int32_t magBiasRawSum[3] = {0, 0, 0};
 
-    const uint8_t samples = 128;
+    const uint8_t samples = 32;
 
     // 128サンプル取得する
     for (i=0; i<samples; i++) //MEMO: up to 255 samples

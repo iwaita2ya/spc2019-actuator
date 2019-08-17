@@ -357,7 +357,7 @@ static void stopFlywheel()
 
     // センサ停止
     if(sensorManager && sensorManager->getCurrentState() != SensorManager::STAND_BY) {
-        sensorManager->end();
+        sensorManager->stop();
     }
 
     // モータ停止（BRAKE ではなく STOP で空転させる）

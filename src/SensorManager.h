@@ -45,7 +45,7 @@ namespace greysound {
 
         ~SensorManager(){
             // stop all activities
-            end();
+            stop();
 
             // メモリ解放
             delete lsm9dof;
@@ -87,7 +87,7 @@ namespace greysound {
 
                 case ACTIVE:
                 case BUSY:
-                    this->end();
+                    this->stop();
                     break;
 
                 case STAND_BY:
@@ -125,9 +125,9 @@ namespace greysound {
             activeTimeMs = activeTimer.read_ms();
 
             // 9dof
-//        lsm9dof->readAccel();
+            //lsm9dof->readAccel();
             lsm9dof->readGyro();
-//        lsm9dof->readMag();
+            //lsm9dof->readMag();
             //lsm9dof->readTemp();
 
             currentState = ACTIVE;
@@ -145,10 +145,10 @@ namespace greysound {
             lsm9dof->readAccel();
             lsm9dof->readGyro();
             lsm9dof->readMag();
-            //lsm9dof->readTemp();
+            lsm9dof->readTemp();
         }
 
-        void end()
+        void stop()
         {
             activeTimer.stop();
             currentState = STAND_BY;
