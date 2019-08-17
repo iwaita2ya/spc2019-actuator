@@ -208,13 +208,9 @@ int main() {
 
     //MEMO: TEST TEST TEST !!!
 //    DEBUG_PRINT("Start DUTY TEST\r\n");
-//    dutyTest(); //MEMO: DEBUG ONLY
+//    dutyTest();
 //    DEBUG_PRINT("Start Brake Test\r\n");
 //    brakeTest();
-
-    // start sensor
-//    DEBUG_PRINT("Start Sensor\r\n", NULL);
-//    startFlywheel();
 
     // キャリブレーションが終わっていない場合は実行する
     if(config->gyroBiasRawX == 0 && config->gyroBiasRawY == 0 && config->gyroBiasRawZ == 0) {
@@ -629,6 +625,9 @@ static void indicateError() {
  **/
 void dutyTest() {
 
+    // 稼働中の場合は一旦停止
+    stopFlywheel();
+
     float duty = 0.0f;
 
     // stop motors
@@ -662,6 +661,9 @@ void dutyTest() {
  * TEST: 最大速度からブレーキをかける
  */
 void brakeTest() {
+
+    // 稼働中の場合は一旦停止
+    stopFlywheel();
 
     /**
      * MOTOR A
