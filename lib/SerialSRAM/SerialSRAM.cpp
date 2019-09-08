@@ -177,7 +177,7 @@ namespace greysound {
     }
 
     /**
-     * Set AutoStore Value (ASE)
+     * Enable/Disable AutoStore (ASE)
      * @param value true:enable, false:disable
      */
     void SerialSRAM::setAutoStore(const uint8_t value) {
@@ -199,6 +199,10 @@ namespace greysound {
         this->writeControlRegister(0x00, buffer);
     }
 
+    /**
+     * Explicitly call HardwareState to store SRAM contents into EEPROM
+     * @return
+     */
     uint8_t SerialSRAM::callHardwareStore() {
 
         // generate LOW->HIGH->LOG trigger
