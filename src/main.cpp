@@ -219,10 +219,8 @@ int main() {
 
     // デバイスの状態に応じでアクチュエータを起動・停止する
     if(config->statusFlags == IDLE) {
-        DEBUG_PRINT("Stop Flywheel\r\n", NULL);
         stopFlywheel();
     } else if (config->statusFlags == ACTIVE) {
-        DEBUG_PRINT("Start Flywheel\r\n", NULL);
         startFlywheel();
     }
 
@@ -274,12 +272,12 @@ int main() {
                 case 0x41: // メモリダンプ　(ascii)
                     dumpMemoryReadable();
                     break;
-                case 0xF0: // 力率あたりの回転数を測定
-                    dutyTest();
-                    break;
-                case 0xF1: // ブレーキテスト
-                    brakeTest();
-                    break;
+//                case 0xF0: // 力率あたりの回転数を測定
+//                    dutyTest();
+//                    break;
+//                case 0xF1: // ブレーキテスト
+//                    brakeTest();
+//                    break;
                 default:
                     break;
             }
@@ -321,6 +319,8 @@ int main() {
 
 static void startFlywheel()
 {
+    DEBUG_PRINT("startFlywheel()\r\n", NULL);
+
     // センサ開始
     if(sensorManager && sensorManager->getCurrentState() == SensorManager::STAND_BY)
     {
@@ -335,9 +335,10 @@ static void startFlywheel()
             sensorTicker->attach(&updateSensor, UPDATE_SENSOR_FREQ);
         }
 
-        // フラグ更新&Save
+        // フラグ更新
         config->statusFlags = ACTIVE;
         sram->write(0x0000, config->statusFlags);
+        // ロギング開始
         config->enableLogging = 1;
         sram->write(0x0007, config->enableLogging);
     }
@@ -346,6 +347,8 @@ static void startFlywheel()
 
 static void stopFlywheel()
 {
+    DEBUG_PRINT("stopFlywheel()\r\n", NULL);
+
     // センサ値更新処理停止
     if(sensorTicker) {
         sensorTicker->detach();
@@ -359,8 +362,11 @@ static void stopFlywheel()
     // モータ停止（BRAKE ではなく STOP で空転させる）
     motorManager->changeMotorState(MOTOR_A, STOP);
     motorManager->changeMotorState(MOTOR_A, STOP);
+    motorManager->aServo->write(0.0); // PWM=0
+    motorManager->bServo->write(0.0); // PWM=0
 
-    // フラグ更新
+
+    // フラグ更新＆ロギング停止
     if(config->statusFlags == ACTIVE) {
         config->statusFlags = IDLE;
         sram->write(0x0000, config->statusFlags);
@@ -368,7 +374,7 @@ static void stopFlywheel()
         sram->write(0x0007, config->enableLogging);
 
         // save data onto EEPROM
-        sram->callHardwareStore();
+        //sram->callHardwareStore();
     }
 }
 
@@ -605,6 +611,7 @@ static void updateSensor()
 
         // ログに記録
         if(config->enableLogging) {
+            motorManager->read(); // PRM 取得
             logData(config->statusFlags, gz_raw, aDutyIndex, bDutyIndex, motorManager->aRPM, motorManager->bRPM);
         }
     }
@@ -893,13 +900,14 @@ void dumpMemory() {
     static const uint8_t bufferLength = 16;
     char *buffer = new char[bufferLength];
 
-    for(uint16_t address=0x0000; address<SRAM_MAX_SIZE; address+=bufferLength) {
+    for(uint16_t address=LOG_START_AT; address<SRAM_MAX_SIZE; address+=bufferLength) {
 
         // Seq. Read
         sram->read(address, buffer, bufferLength);
 
         for(uint8_t i=0; i<bufferLength; i++) {
             serial->putc(buffer[i]);
+            wait_ms(10); //MEMO: データ崩れ防止
         }
     }
 
@@ -922,6 +930,7 @@ void dumpMemoryReadable() {
             serial->printf("%02x ", buffer[i]);
         }
         serial->printf("\r\n");
+        wait_ms(100);
     }
 
     delete[] buffer;
@@ -929,6 +938,7 @@ void dumpMemoryReadable() {
 
 void clearLog(uint16_t startAddress, uint16_t endAddress){
 
+    // clear log data
     uint8_t retryCount = 0;
     for (uint16_t i=startAddress; i<endAddress; i++) {
         retryCount = 0;
@@ -936,6 +946,10 @@ void clearLog(uint16_t startAddress, uint16_t endAddress){
             sram->write(i, 0x00);
         }
     }
+
+    // reset log pointer
+    config->logPointer = LOG_START_AT;
+    sram->write(0x0008, config->logPointer);
 
     // save data onto EEPROM
     sram->callHardwareStore();
@@ -946,16 +960,21 @@ void clearLog(uint16_t startAddress, uint16_t endAddress){
  */
 void logData(uint8_t _currentStatus, int16_t _gz_raw, uint8_t _aDutyIndex, uint8_t _bDutyIndex, uint16_t _aRPM, uint16_t _bRPM) {
 
+    //serial->printf("%d,%d,%d,%d,%d,%d\r\n", _currentStatus, _gz_raw, _aDutyIndex, _bDutyIndex, _aRPM, _bRPM);
+
     // if overflow, reset pointer
     if(config->logPointer + CONFIG_LOG_SIZE > SRAM_MAX_SIZE) {
         config->logPointer = LOG_START_AT;
     }
 
+    char charValue[sizeof(int16_t)];
+
     // write current status
     sram->write(config->logPointer++, _currentStatus);
 
     // write gz_raw
-    sram->write(config->logPointer, _gz_raw);
+    memcpy(charValue, &_gz_raw, sizeof(int16_t));
+    sram->write(config->logPointer, charValue, sizeof(int16_t));
     config->logPointer += 2;
 
     // write duty index for Motor A
@@ -965,13 +984,16 @@ void logData(uint8_t _currentStatus, int16_t _gz_raw, uint8_t _aDutyIndex, uint8
     sram->write(config->logPointer++, _bDutyIndex);
 
     // write RPM for Motor A
-    sram->write(config->logPointer, _aRPM);
+    memcpy(charValue, &_aRPM, sizeof(uint16_t));
+    sram->write(config->logPointer, charValue, sizeof(uint16_t));
     config->logPointer += 2;
 
     // write RPM for Motor B
-    sram->write(config->logPointer, _bRPM);
+    memcpy(charValue, &_bRPM, sizeof(uint16_t));
+    sram->write(config->logPointer, charValue, sizeof(uint16_t));
     config->logPointer += 2;
 
     // save current logging pointer
-    sram->write(0x0008, config->logPointer);
+    memcpy(charValue, &config->logPointer, sizeof(uint16_t));
+    sram->write(0x0008, charValue, sizeof(uint16_t));
 }
