@@ -40,7 +40,7 @@ struct accelSettings
 {
     // Accelerometer settings:
     uint8_t enabled;
-    uint8_t scale;
+    accel_scale scale;
     uint8_t sampleRate;
     // New accel stuff:
     uint8_t enableX;

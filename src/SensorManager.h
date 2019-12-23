@@ -7,7 +7,8 @@
 
 #include <mbed.h>
 #include "GsLSM9DS1.h"
-#include "Gs47SerialSRAM.h"
+#include "GsLSM9DS1_Constants.h"
+#include "SerialSRAM.h"
 #include "sineTable.h"
 
 namespace greysound {
@@ -44,7 +45,7 @@ namespace greysound {
 
         ~SensorManager(){
             // stop all activities
-            end();
+            stop();
 
             // メモリ解放
             delete lsm9dof;
@@ -53,13 +54,26 @@ namespace greysound {
         void init()
         {
             // init sensor
-            lsm9dof->init();
+            lsm9dof->init(
+                    A_SCALE_2G,      // Acc : +/- 2g
+                    G_SCALE_245DPS,  // Gyro: +/- 245 deg/s
+                    M_SCALE_4GS,     // Mag :
+                    A_ODR_119,       // Acc  Data Rate
+                    G_ODR_119_BW_14, // Gyro Data Rate
+                    M_ODR_80         // Mag  Data Rate
+                    );
 
+            currentState = STAND_BY;
+        }
+
+        void calibration(int16_t *gBiasRawX, int16_t *gBiasRawY, int16_t *gBiasRawZ) {
             // perform calibration
             lsm9dof->calibrate();
             lsm9dof->calibrateMag(true); // true: save calculated bias onto register
 
-            currentState = STAND_BY;
+            *gBiasRawX = lsm9dof->gBiasRaw[0];
+            *gBiasRawY = lsm9dof->gBiasRaw[1];
+            *gBiasRawZ = lsm9dof->gBiasRaw[2];
         }
 
         uint8_t begin()
@@ -73,7 +87,7 @@ namespace greysound {
 
                 case ACTIVE:
                 case BUSY:
-                    this->end();
+                    this->stop();
                     break;
 
                 case STAND_BY:
@@ -111,9 +125,9 @@ namespace greysound {
             activeTimeMs = activeTimer.read_ms();
 
             // 9dof
-//        lsm9dof->readAccel();
+            //lsm9dof->readAccel();
             lsm9dof->readGyro();
-//        lsm9dof->readMag();
+            //lsm9dof->readMag();
             //lsm9dof->readTemp();
 
             currentState = ACTIVE;
@@ -131,10 +145,10 @@ namespace greysound {
             lsm9dof->readAccel();
             lsm9dof->readGyro();
             lsm9dof->readMag();
-            //lsm9dof->readTemp();
+            lsm9dof->readTemp();
         }
 
-        void end()
+        void stop()
         {
             activeTimer.stop();
             currentState = STAND_BY;

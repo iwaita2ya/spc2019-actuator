@@ -45,7 +45,7 @@ void GsLSM9DS1::init(
     settings.gyro.enableY = 1;
     settings.gyro.enableZ = 1;
 
-    // gyro scale can be 245, 500, or 2000
+    // gyro scale can be 245, 500, or 2000 (degree/sec)
     settings.gyro.scale = 245;
 
     // gyro sample rate: value between 1-6
@@ -82,16 +82,16 @@ void GsLSM9DS1::init(
     settings.accel.enableY = 0;
     settings.accel.enableZ = 0;
 
-    // accel scale can be 2, 4, 8, or 16
-    settings.accel.scale = 2;
+    // Accelerometer scale can be 2, 4, 8, or 16
+    settings.accel.scale = aScl; //TODO: aScaleリプレース用
 
-    // accel sample rate can be 1-6
+    // Accelerometer sample rate can be 1-6
     // 1 = 10 Hz    4 = 238 Hz
     // 2 = 50 Hz    5 = 476 Hz
     // 3 = 119 Hz   6 = 952 Hz
     settings.accel.sampleRate = 6;
 
-    // Accel cutoff freqeuncy can be any value between -1 - 3.
+    // Accelerometer cutoff frequency can be any value between -1 - 3.
     // -1 = bandwidth determined by sample rate
     // 0 = 408 Hz   2 = 105 Hz
     // 1 = 211 Hz   3 = 50 Hz
@@ -99,7 +99,7 @@ void GsLSM9DS1::init(
 
     settings.accel.highResEnable = 0;
 
-    // accelHighResBandwidth can be any value between 0-3
+    // highResBandwidth can be any value between 0-3
     // LP cutoff is set to a factor of sample rate
     // 0 = ODR/50    2 = ODR/9
     // 1 = ODR/100   3 = ODR/400
@@ -150,11 +150,12 @@ void GsLSM9DS1::init(
     // バイアス補正の使用するか(0:使用しない, 1:使用する)
     _autoCalc = 1;
 
+    // スケールを変数に保存
     // Store the given scales in class variables. These scale variables
     // are used throughout to calculate the actual g's, DPS,and Gs's.
-    aScale = aScl;
-    gScale = gScl;
-    mScale = mScl;
+    aScale = aScl; //MEMO: initAccel()内部で初期スケールとして使用される
+    gScale = gScl; //MEMO: initGyro() 内部で初期スケールとして使用される
+    mScale = mScl; //MEMO: initMag()  内部で初期スケールとして使用される
 
     // Once we have the scale values, we can calculate the resolution
     // of each sensor. That's what these functions are for. One for each sensor
@@ -163,19 +164,16 @@ void GsLSM9DS1::init(
     calcmRes(); // Calculate Gs / ADC tick, stored in mRes variable
 
     // Accelerometer initialization stuff:
-    initAccel(); // "Turn on" all axes of the accel. Set up interrupts, etc.
-    setAccelODR(aODR); // Set the accel data rate. (initAccel() の初期値以外に変更する場合)
-    setAccelScale(aScale); // Set the accel range. (initAccel() の初期値以外に変更する場合)
-    
+    initAccel(); // "Turn on" all axes of the accelerometer. Set up interrupts, etc.
+    setAccelODR(aODR); // Set the accelerometer data rate. (initAccel() の初期値以外に変更する場合)
+
     // Gyro initialization stuff:
     initGyro(); // This will "turn on" the gyro. Setting up interrupts, etc.
     setGyroODR(gODR); // Set the gyro output data rate and bandwidth.
-    setGyroScale(gScale); // Set the gyro range
-    
+
     // Magnetometer initialization stuff:
     initMag(); // "Turn on" all axes of the mag. Set up interrupts, etc.
     setMagODR(mODR); // Set the magnetometer output data rate.
-    setMagScale(mScale); // Set the magnetometer's range.
 }
 
 // BEGIN ----------------------------------------------------------------------
@@ -307,7 +305,7 @@ void GsLSM9DS1::calibrate(bool autoCalc)
 //    serial->printf("acclBiasRawTemp %d/%d/%d\r\n", (int)aBiasRawTemp[X_AXIS], (int)aBiasRawTemp[Y_AXIS], (int)aBiasRawTemp[Z_AXIS]);
 
     // ジャイロと加速度のゆらぎを求め、オフセットとして格納する
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < 3; i++) // x, y, z
     {
         // gyro
         gBiasRaw[i] = (int16_t) gBiasRawTemp[i] / samples;
@@ -336,7 +334,7 @@ void GsLSM9DS1::calibrateMag(bool loadIn)
     uint8_t i, j;
     int32_t magBiasRawSum[3] = {0, 0, 0};
 
-    const uint8_t samples = 128;
+    const uint8_t samples = 32;
 
     // 128サンプル取得する
     for (i=0; i<samples; i++) //MEMO: up to 255 samples
@@ -495,6 +493,7 @@ void GsLSM9DS1::readGyro()
         gz_raw -= gBiasRaw[Z_AXIS];
     }
 
+    //MEMO: 取得値を dps (degree per sec: 度/秒)に変換する
     // calc real-world values
     gx = gx_raw * gRes;
     gy = gy_raw * gRes;
