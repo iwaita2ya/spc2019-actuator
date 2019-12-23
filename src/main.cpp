@@ -1,4 +1,4 @@
-#define DEBUG
+//#define DEBUG
 
 #include <mbed.h>
 #include "SystemParameters.h"
@@ -248,27 +248,27 @@ int main() {
                 case 0x11: // アクチュエータ開始
                     startFlywheel();
                     break;
-                case 0x20: // Config 表示 (hex)
-                    printConfig();
-                    break;
+//                case 0x20: // Config 表示 (hex)
+//                    printConfig();
+//                    break;
                 case 0x21: // Config 表示 (ascii)
                     printConfigReadable();
                     break;
                 case 0x22: // Config 初期化
                     resetConfig();
                     break;
-                case 0x23: // Load SRAM->Config
-                    loadConfig();
-                    break;
-                case 0x24: // Save Config->SRAM
-                    saveConfig();
-                    break;
+//                case 0x23: // Load SRAM->Config
+//                    loadConfig();
+//                    break;
+//                case 0x24: // Save Config->SRAM
+//                    saveConfig();
+//                    break;
                 case 0x30: // ログデータ消去
                     clearLog();
                     break;
-                case 0x40: // メモリダンプ　(hex)
-                    dumpMemory();
-                    break;
+//                case 0x40: // メモリダンプ　(hex)
+//                    dumpMemory();
+//                    break;
                 case 0x41: // メモリダンプ　(ascii)
                     dumpMemoryReadable();
                     break;
@@ -299,7 +299,7 @@ int main() {
 //                , (int)motorManager->aRPM, (int)motorManager->bRPM);
 
         led->write(!(led->read()));
-        wait(0.5);
+        wait(0.2);
     }
 
     // stop & terminate objects
